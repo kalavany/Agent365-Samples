@@ -7,9 +7,9 @@ using System.Text.Json;
 namespace W365ComputerUseSample.ComputerUse;
 
 /// <summary>
-/// StartSession arguments for one turn. <c>sessionKind</c> and <c>sessionProperties</c> come only
-/// from the user's Activity.Value; <c>userObjectId</c> comes only from the MCP access token.
-/// No value is filled in from configuration.
+/// StartSession arguments for one turn. <c>sessionKind</c> and <c>sessionProperties</c> are optional and
+/// come only from the user's Activity.Value; nothing is filled in from configuration, so a turn without them
+/// keeps the default W365 checkout. <c>userObjectId</c> comes only from the MCP access token.
 /// </summary>
 public sealed class W365StartSessionRequest
 {
@@ -18,7 +18,7 @@ public sealed class W365StartSessionRequest
 
     private readonly string? sessionPropertiesJson;
 
-    private W365StartSessionRequest(string sessionKind, string userObjectId, JsonElement? sessionProperties)
+    private W365StartSessionRequest(string? sessionKind, string userObjectId, JsonElement? sessionProperties)
     {
         SessionKind = sessionKind;
         UserObjectId = userObjectId;
@@ -30,7 +30,9 @@ public sealed class W365StartSessionRequest
         }
     }
 
-    public string SessionKind { get; }
+    /// <summary>User-supplied session kind, or null when not supplied.</summary>
+    public string? SessionKind { get; }
+
     public string UserObjectId { get; }
 
     /// <summary>User-supplied display width, or null when not supplied.</summary>
@@ -40,16 +42,17 @@ public sealed class W365StartSessionRequest
     public int? DisplayHeight { get; }
 
     /// <summary>
-    /// Reads the required <c>sessionKind</c> and optional <c>sessionProperties</c> from Activity.Value,
-    /// and the required caller <c>oid</c> from the outbound MCP token. Reading the claim does not
-    /// validate the token; the MCP server authenticates it.
+    /// Reads the optional <c>sessionKind</c> and <c>sessionProperties</c> from Activity.Value, and the
+    /// required caller <c>oid</c> from the outbound MCP token. Reading the claim does not validate the
+    /// token; the MCP server authenticates it. The MCP server enforces the <c>sessionKind</c> values and
+    /// that <c>sessionProperties</c> requires <c>sessionKind</c>.
     /// </summary>
     public static W365StartSessionRequest FromActivityValue(object? value, string accessToken)
     {
         var userObjectId = GetCallerObjectId(accessToken);
         if (value == null)
         {
-            throw new ArgumentException("Activity.Value must be a JSON object containing sessionKind.", nameof(value));
+            return new W365StartSessionRequest(null, userObjectId, null);
         }
 
         JsonElement options;
@@ -61,19 +64,23 @@ public sealed class W365StartSessionRequest
         }
         catch (JsonException ex)
         {
-            throw new ArgumentException("Activity.Value must be a JSON object containing sessionKind.", nameof(value), ex);
+            throw new ArgumentException("Activity.Value must be a JSON object.", nameof(value), ex);
         }
 
         if (options.ValueKind != JsonValueKind.Object)
         {
-            throw new ArgumentException("Activity.Value must be a JSON object containing sessionKind.", nameof(value));
+            throw new ArgumentException("Activity.Value must be a JSON object.", nameof(value));
         }
 
-        if (!options.TryGetProperty("sessionKind", out var sessionKind)
-            || sessionKind.ValueKind != JsonValueKind.String
-            || string.IsNullOrWhiteSpace(sessionKind.GetString()))
+        string? sessionKind = null;
+        if (options.TryGetProperty("sessionKind", out var suppliedKind))
         {
-            throw new ArgumentException("sessionKind is required and must be a nonempty string.", nameof(value));
+            if (suppliedKind.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(suppliedKind.GetString()))
+            {
+                throw new ArgumentException("sessionKind must be a nonempty string.", nameof(value));
+            }
+
+            sessionKind = suppliedKind.GetString();
         }
 
         JsonElement? sessionProperties = null;
@@ -83,20 +90,24 @@ public sealed class W365StartSessionRequest
             sessionProperties = suppliedProperties.Clone();
         }
 
-        return new W365StartSessionRequest(sessionKind.GetString()!.Trim(), userObjectId, sessionProperties);
+        return new W365StartSessionRequest(sessionKind, userObjectId, sessionProperties);
     }
 
     /// <summary>
-    /// Builds fresh MCP arguments so tool invocation cannot mutate this request. <c>sessionProperties</c>
-    /// is sent exactly as supplied and omitted when the user did not supply it.
+    /// Builds fresh MCP arguments so tool invocation cannot mutate this request. <c>sessionKind</c> and
+    /// <c>sessionProperties</c> are sent exactly as supplied and omitted when the user did not supply them.
     /// </summary>
     public Dictionary<string, object?> ToArguments()
     {
         var arguments = new Dictionary<string, object?>
         {
-            ["sessionKind"] = SessionKind,
             ["userObjectId"] = UserObjectId,
         };
+        if (SessionKind != null)
+        {
+            arguments["sessionKind"] = SessionKind;
+        }
+
         if (sessionPropertiesJson != null)
         {
             arguments["sessionProperties"] = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(sessionPropertiesJson)!

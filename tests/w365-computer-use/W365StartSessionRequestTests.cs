@@ -105,8 +105,6 @@ public sealed class W365StartSessionRequestTests
     [InlineData("[]")]
     [InlineData("null")]
     [InlineData("{")]
-    [InlineData("{}")]
-    [InlineData("""{"sessionProperties":{"displayWidth":1280}}""")]
     [InlineData("""{"sessionKind":""}""")]
     [InlineData("""{"sessionKind":" "}""")]
     [InlineData("""{"sessionKind":null}""")]
@@ -120,17 +118,42 @@ public sealed class W365StartSessionRequestTests
     [InlineData("""{"sessionKind":"local","sessionProperties":{"displayWidth":"1280"}}""")]
     [InlineData("""{"sessionKind":"local","sessionProperties":{"displayWidth":1.5}}""")]
     [InlineData("""{"sessionKind":"local","sessionProperties":{"displayWidth":2147483648}}""")]
-    public void MissingSessionKindOrInvalidSuppliedOptionsAreRejected(string value)
+    public void InvalidSuppliedOptionsAreRejected(string value)
     {
         Assert.Throws<ArgumentException>(() => W365StartSessionRequest.FromActivityValue(value, Token(CallerOid)));
     }
 
-    [Fact]
-    public void MissingActivityValueIsRejected()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("{}")]
+    [InlineData("""{"other":"ignored"}""")]
+    public void NoSessionOptionsSendsNeitherSessionKindNorProperties(string? value)
     {
-        var exception = Assert.Throws<ArgumentException>(() => W365StartSessionRequest.FromActivityValue(null, Token(CallerOid)));
+        var request = W365StartSessionRequest.FromActivityValue(value, Token(CallerOid));
 
-        Assert.StartsWith("Activity.Value must be a JSON object containing sessionKind.", exception.Message);
+        AssertPayload(request, """{"userObjectId":"11111111-1111-4111-8111-111111111111"}""");
+        Assert.Null(request.SessionKind);
+        Assert.Null(request.DisplayWidth);
+        Assert.Null(request.DisplayHeight);
+    }
+
+    [Fact]
+    public void SessionKindIsForwardedExactlyWithoutTrimming()
+    {
+        var request = W365StartSessionRequest.FromActivityValue("""{"sessionKind":"agentic "}""", Token(CallerOid));
+
+        AssertPayload(request, """{"sessionKind":"agentic ","userObjectId":"11111111-1111-4111-8111-111111111111"}""");
+    }
+
+    [Fact]
+    public void SessionPropertiesWithoutSessionKindAreForwardedForServerValidation()
+    {
+        var request = W365StartSessionRequest.FromActivityValue("""{"sessionProperties":{"displayWidth":1280}}""", Token(CallerOid));
+
+        AssertPayload(
+            request,
+            """{"userObjectId":"11111111-1111-4111-8111-111111111111","sessionProperties":{"displayWidth":1280}}""");
+        Assert.Equal(1280, request.DisplayWidth);
     }
 
     [Theory]

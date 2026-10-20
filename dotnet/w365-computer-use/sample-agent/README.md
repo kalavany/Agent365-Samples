@@ -368,19 +368,27 @@ The tool type is auto-derived from the model name (`gpt-*` -> `computer`, otherw
 
 ### StartSession request options
 
-Every `mcp_W365ComputerUse_StartSession` call includes the required `sessionKind`
-and `userObjectId`, plus `sessionProperties` when the user supplies it. No value
-is filled in from configuration.
+Every `mcp_W365ComputerUse_StartSession` call includes `userObjectId`.
+`sessionKind` and `sessionProperties` are optional and sent only when the user
+supplies them; nothing is filled in from configuration.
 
-- `sessionKind` (required) comes from the activity's `value` object.
-- `userObjectId` (required) is the `oid` claim of the access token selected for
-  W365 MCP, not the Teams sender, Graph token, or an identity supplied in the
-  message. The sample reads that outbound token; MCP remains responsible for
-  validating the token and authorizing the caller.
+- `userObjectId` is the `oid` claim of the access token selected for W365 MCP,
+  not the Teams sender, Graph token, or an identity supplied in the message.
+  The sample reads that outbound token; MCP remains responsible for validating
+  the token and authorizing the caller (the MCP platform derives the caller's
+  OID from the token itself).
+- `sessionKind` (optional) comes from the activity's `value` object and is
+  forwarded exactly as supplied. The MCP platform accepts `local`, `human`, or
+  `agentic`.
 - `sessionProperties` (optional) comes from the activity's `value` object and is
-  forwarded exactly as supplied. Its fields are optional; when present,
-  `displayWidth` and `displayHeight` must be positive integers and `browserMode`
-  must be a nonempty string. When omitted, `sessionProperties` is not sent.
+  forwarded exactly as supplied. The MCP platform requires `sessionKind` with it.
+  Its fields are optional; when present, `displayWidth` and `displayHeight` must
+  be positive integers and `browserMode` must be a nonempty string.
+
+Without `sessionKind` or `sessionProperties`, the MCP platform starts the
+session through the default W365 checkout. Supplying them selects the W365
+checkout that accepts session options, which must be deployed in that
+environment.
 
 Example activity `value`:
 
@@ -395,11 +403,12 @@ Example activity `value`:
 }
 ```
 
-A missing or invalid `sessionKind`, malformed `sessionProperties`, or a
-missing/invalid token `oid` fails the computer-use turn explicitly. A
-message-supplied `userObjectId` is ignored. These options apply to new sessions
-and recovery starts during that turn; they do not resize an already active
-session. Non-computer-use messages do not require them.
+A malformed `sessionKind` or `sessionProperties`, or a missing/invalid token
+`oid`, fails the computer-use turn explicitly; option values the MCP platform or
+W365 rejects are returned as the StartSession error. A message-supplied
+`userObjectId` is ignored. These options apply to new sessions and recovery
+starts during that turn; they do not resize an already active session.
+Non-computer-use messages do not use them.
 
 `ComputerUse:DisplayWidth` / `ComputerUse:DisplayHeight` are not sent to
 StartSession. They only size the `computer_use_preview` model tool when the user
