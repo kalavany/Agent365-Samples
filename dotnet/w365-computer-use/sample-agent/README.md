@@ -378,17 +378,17 @@ supplies them; nothing is filled in from configuration.
   the token and authorizing the caller (the MCP platform derives the caller's
   OID from the token itself).
 - `sessionKind` (optional) comes from the activity's `value` object and is
-  forwarded exactly as supplied. The MCP platform accepts `local`, `human`, or
-  `agentic`.
+  forwarded exactly as supplied. The MCP platform accepts `local` or `agentic`
+  for agent users and `local` or `human` for human users.
 - `sessionProperties` (optional) comes from the activity's `value` object and is
-  forwarded exactly as supplied. The MCP platform requires `sessionKind` with it.
+  forwarded exactly as supplied, with or without `sessionKind`.
   Its fields are optional; when present, `displayWidth` and `displayHeight` must
   be positive integers and `browserMode` must be a nonempty string.
 
-Without `sessionKind` or `sessionProperties`, the MCP platform starts the
-session through the default W365 checkout. Supplying them selects the W365
-checkout that accepts session options, which must be deployed in that
-environment.
+Without `sessionKind`, the MCP platform starts the session through the default
+W365 checkout (with `sessionProperties` added when supplied). Supplying
+`sessionKind` selects the W365 checkout for explicit session kinds, which must be
+deployed in that environment.
 
 Example activity `value`:
 
