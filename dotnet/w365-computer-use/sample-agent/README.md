@@ -366,6 +366,47 @@ The tool type is auto-derived from the model name (`gpt-*` -> `computer`, otherw
 
 ## Session Management
 
+### StartSession request options
+
+Every `mcp_W365ComputerUse_StartSession` call includes `sessionKind`, `userObjectId`,
+and `sessionProperties` (`displayWidth`, `displayHeight`, `browserMode`). The
+`userObjectId` is the `oid` claim of the access token actually selected for W365
+MCP, not the Teams sender, Graph token, or an identity supplied in the message.
+The sample reads that outbound token; MCP remains responsible for validating
+the token and authorizing the caller.
+
+Clients can supply per-message overrides in the activity's `value` object:
+
+```json
+{
+  "sessionKind": "local",
+  "sessionProperties": {
+    "displayWidth": 1280,
+    "displayHeight": 720,
+    "browserMode": "chromium"
+  }
+}
+```
+
+Omitted fields use `ComputerUse:SessionKind` (default `local`),
+`ComputerUse:BrowserMode` (default `chromium`), and the existing
+`ComputerUse:DisplayWidth` / `ComputerUse:DisplayHeight` settings (defaults
+1024 / 768). Supplied strings must be nonempty and dimensions must be positive
+integers. Invalid options or a missing/invalid token `oid` fail explicitly.
+Message-supplied `userObjectId` is ignored. These options apply to new sessions
+and recovery starts during that turn; they do not resize an already active
+session. Non-computer-use messages do not require these options.
+Cached W365 connections are checked against the current MCP caller `oid`; a
+caller change is rejected explicitly instead of sending another caller's
+`userObjectId` over the cached connection. Start a new conversation (production)
+or restart the local agent after changing the development bearer-token caller.
+
+Run the focused offline request and orchestration tests from the repository root:
+
+```powershell
+dotnet test tests\w365-computer-use\W365ComputerUseSample.Tests.csproj
+```
+
 - Sessions are started with `mcp_W365ComputerUse_StartSession`; multiple session IDs can be cached for one conversation
 - If a user references a known `sessionId`, the orchestrator selects that session before taking screenshots or sending remote W365 tool calls
 - Conversation history accumulates across messages, giving the model context for follow-up tasks

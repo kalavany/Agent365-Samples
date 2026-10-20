@@ -28,11 +28,13 @@ internal sealed class W365McpSessionClient
     }
 
     public async Task<W365McpToolListResult> StartSessionAndListToolsAsync(
+        W365StartSessionRequest request,
         CancellationToken cancellationToken,
         string? conversationId = null,
         string? channelId = null)
     {
-        var startArguments = new Dictionary<string, object?>();
+        ArgumentNullException.ThrowIfNull(request);
+        var startArguments = request.ToArguments();
         var startResultJson = await ToolTelemetry.InvokeAsync(
             toolName: ComputerUseOrchestrator.W365StartSessionToolName,
             arguments: startArguments,

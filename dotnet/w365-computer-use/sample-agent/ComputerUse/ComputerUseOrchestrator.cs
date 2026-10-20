@@ -104,6 +104,7 @@ public class ComputerUseOrchestrator
     private readonly ConcurrentDictionary<string, ConversationSession> _sessions = new();
 
     private readonly ConcurrentDictionary<string, IMcpClient> _w365McpClientsBySessionId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<IMcpClient, string> _w365McpCallerObjectIds = new();
 
     /// <summary>
     /// Primary MCP client (W365 server) — used for direct screenshot calls.
@@ -424,7 +425,8 @@ public class ComputerUseOrchestrator
         string? prestartedScreenShareUrl = null,
         string? telemetryConversationId = null,
         string? telemetryChannelId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        W365StartSessionRequest? startSessionRequest = null)
     {
         _logger.LogInformation("Processing message for conversation {ConversationId}", conversationId);
 
@@ -444,6 +446,9 @@ public class ComputerUseOrchestrator
         await session.TurnLock.WaitAsync(cancellationToken);
         try
         {
+            session.StartSessionRequest = includeCuaTool
+                ? startSessionRequest ?? throw new InvalidOperationException("W365 session request context is required for computer use.")
+                : null;
             session.TelemetryConversationId = !string.IsNullOrWhiteSpace(telemetryConversationId)
                 ? telemetryConversationId
                 : conversationId;
@@ -470,6 +475,7 @@ public class ComputerUseOrchestrator
         }
         finally
         {
+            session.StartSessionRequest = null;
             session.TurnLock.Release();
         }
     }
@@ -511,7 +517,7 @@ public class ComputerUseOrchestrator
 
         if (includeCuaTool && !string.IsNullOrWhiteSpace(prestartedW365SessionId) && string.IsNullOrEmpty(session.W365SessionId))
         {
-            session.TrackAndSelectSession(prestartedW365SessionId);
+            session.TrackAndSelectSession(prestartedW365SessionId, session.StartSessionRequest);
             if (!string.IsNullOrWhiteSpace(prestartedScreenShareUrl))
             {
                 session.ScreenShareUrlsBySessionId[prestartedW365SessionId] = prestartedScreenShareUrl;
@@ -620,6 +626,24 @@ public class ComputerUseOrchestrator
         for (var i = 0; i < _maxIterations; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (includeCuaTool && session.StartSessionRequest is { } request)
+            {
+                var dimensions = session.W365SessionId is { } activeSessionId
+                    && session.DisplaySizesBySessionId.TryGetValue(activeSessionId, out var activeDimensions)
+                        ? activeDimensions
+                        : (Width: request.DisplayWidth, Height: request.DisplayHeight);
+                for (var toolIndex = 0; toolIndex < modelTools.Count; toolIndex++)
+                {
+                    if (modelTools[toolIndex] is ComputerUseTool)
+                    {
+                        modelTools[toolIndex] = new ComputerUseTool
+                        {
+                            DisplayWidth = dimensions.Width,
+                            DisplayHeight = dimensions.Height
+                        };
+                    }
+                }
+            }
 
             // When running without the computer tool, strip past CUA-only turns from the history.
             // Azure OpenAI 400s when an item references a tool that isn't declared in this turn:
@@ -932,7 +956,8 @@ public class ComputerUseOrchestrator
             lifecycleTools.AddRange(additionalTools);
         }
 
-        var startArguments = new Dictionary<string, object?>();
+        var startArguments = (session.StartSessionRequest
+            ?? throw new InvalidOperationException("W365 session request context is required to start a session.")).ToArguments();
         string resultStr;
         if (mcpClient != null)
         {
@@ -973,7 +998,7 @@ public class ComputerUseOrchestrator
             throw new InvalidOperationException($"Tool '{W365StartSessionToolName}' did not return a sessionId.");
         }
 
-        session.TrackAndSelectSession(sessionId);
+        session.TrackAndSelectSession(sessionId, session.StartSessionRequest);
         if (TryExtractStringProperty(resultStr, "screenShareUrl", out var screenShareUrl)
             && !string.IsNullOrWhiteSpace(screenShareUrl))
         {
@@ -1080,7 +1105,10 @@ public class ComputerUseOrchestrator
         // message should re-hit ATG rather than silently reuse the failure. Otherwise the sample
         // agent becomes permanently wedged on a single bad connect.
         if (_cachedTools != null && _cachedTools.Any(t => IsW365CuaTool((t as AIFunction)?.Name)))
+        {
+            EnsureMcpCallerMatches(_cachedMcpClient, W365StartSessionRequest.GetCallerObjectId(accessToken));
             return (_cachedTools, _cachedMcpClient);
+        }
 
         // Stale caches from a failed prior attempt — clear before reconnecting.
         if (_cachedTools != null)
@@ -1168,7 +1196,10 @@ public class ComputerUseOrchestrator
                 // Use the W365 server's client for direct screenshot calls.
                 var hasW365Tools = tools.Any(t => IsW365CuaTool((t as AIFunction)?.Name));
                 if (hasW365Tools)
+                {
+                    _w365McpCallerObjectIds[client] = W365StartSessionRequest.GetCallerObjectId(accessToken);
                     _cachedMcpClient = client;
+                }
 
                 _logger.LogInformation("Connected to MCP server at {Url}, loaded {Count} tools: {Names}",
                     url, tools.Count, string.Join(", ", tools.Select(t => (t as AIFunction)?.Name ?? "?")));
@@ -1281,12 +1312,14 @@ public class ComputerUseOrchestrator
         string agentId,
         ITurnContext turnContext,
         string? existingSessionId,
+        W365StartSessionRequest startSessionRequest,
         CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(existingSessionId)
             && _cachedMcpClient != null
             && _w365McpClientsBySessionId.TryGetValue(existingSessionId, out var sessionMcpClient))
         {
+            EnsureMcpCallerMatches(sessionMcpClient, startSessionRequest.UserObjectId);
             try
             {
                 var cachedSessionClient = new W365McpSessionClient(sessionMcpClient);
@@ -1317,6 +1350,7 @@ public class ComputerUseOrchestrator
             var directClient = new W365McpSessionClient(mcpClient);
             var result = string.IsNullOrWhiteSpace(existingSessionId)
                 ? await directClient.StartSessionAndListToolsAsync(
+                    startSessionRequest,
                     cancellationToken,
                     turnContext.Activity.Conversation?.Id,
                     turnContext.Activity.ChannelId)
@@ -1328,6 +1362,7 @@ public class ComputerUseOrchestrator
             _cachedTools = result.Tools;
             _cachedMcpClient = result.Client;
             _w365McpClientsBySessionId[result.SessionId] = result.Client;
+            _w365McpCallerObjectIds[result.Client] = startSessionRequest.UserObjectId;
             _allMcpClients.Add(result.Client);
             _logger.LogInformation("Started direct W365 session {SessionId} and loaded {ToolCount} tools via MCP transport.", result.SessionId, result.Tools.Count);
             return result;
@@ -1344,6 +1379,16 @@ public class ComputerUseOrchestrator
         if (!string.IsNullOrWhiteSpace(value))
         {
             httpClient.DefaultRequestHeaders.TryAddWithoutValidation(name, value);
+        }
+    }
+
+    private void EnsureMcpCallerMatches(IMcpClient? client, string userObjectId)
+    {
+        if (client == null
+            || !_w365McpCallerObjectIds.TryGetValue(client, out var cachedCaller)
+            || !string.Equals(cachedCaller, userObjectId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The cached W365 MCP connection does not match the current MCP caller. Start a new conversation or restart the local agent.");
         }
     }
 
@@ -1422,6 +1467,7 @@ public class ComputerUseOrchestrator
         }
 
         _allMcpClients.Remove(client);
+        _w365McpCallerObjectIds.TryRemove(client, out _);
         if (ReferenceEquals(_cachedMcpClient, client))
         {
             _cachedMcpClient = _w365McpClientsBySessionId.Values.FirstOrDefault();
@@ -2536,6 +2582,11 @@ public class ComputerUseOrchestrator
         try
         {
             var args = JsonSerializer.Deserialize<Dictionary<string, object?>>(argsStr) ?? [];
+            if (string.Equals(name, W365StartSessionToolName, StringComparison.OrdinalIgnoreCase))
+            {
+                args = (session.StartSessionRequest
+                    ?? throw new InvalidOperationException("W365 session request context is required to start a session.")).ToArguments();
+            }
             if (string.Equals(name, W365GetSessionDetailsToolName, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(session.W365SessionId)
                 && !args.ContainsKey("sessionId"))
@@ -2566,7 +2617,7 @@ public class ComputerUseOrchestrator
 
                 if (TryExtractStringProperty(resultStr, "sessionId", out var sessionId))
                 {
-                    session.TrackAndSelectSession(sessionId);
+                    session.TrackAndSelectSession(sessionId, session.StartSessionRequest);
                     if (TryExtractStringProperty(resultStr, "screenShareUrl", out var screenShareUrl)
                         && !string.IsNullOrWhiteSpace(screenShareUrl))
                     {
@@ -2766,6 +2817,8 @@ public class ComputerUseOrchestrator
         public bool FolderShared { get; set; }
         public string? TelemetryConversationId { get; set; }
         public string? TelemetryChannelId { get; set; }
+        public W365StartSessionRequest? StartSessionRequest { get; set; }
+        public Dictionary<string, (int Width, int Height)> DisplaySizesBySessionId { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// screenShareUrl captured per W365 session id (from StartSession or a GetSessionDetails
@@ -2785,7 +2838,7 @@ public class ComputerUseOrchestrator
         /// </summary>
         public SemaphoreSlim TurnLock { get; } = new(1, 1);
 
-        public void TrackAndSelectSession(string? sessionId)
+        public void TrackAndSelectSession(string? sessionId, W365StartSessionRequest? request = null)
         {
             if (string.IsNullOrWhiteSpace(sessionId))
             {
@@ -2794,6 +2847,10 @@ public class ComputerUseOrchestrator
 
             W365SessionId = sessionId.Trim();
             W365SessionIds.Add(W365SessionId);
+            if (request != null)
+            {
+                DisplaySizesBySessionId[W365SessionId] = (request.DisplayWidth, request.DisplayHeight);
+            }
             SessionStarted = true;
         }
 
@@ -2802,6 +2859,7 @@ public class ComputerUseOrchestrator
             if (!string.IsNullOrWhiteSpace(sessionId))
             {
                 W365SessionIds.Remove(sessionId);
+                DisplaySizesBySessionId.Remove(sessionId);
             }
 
             if (string.Equals(W365SessionId, sessionId, StringComparison.OrdinalIgnoreCase))

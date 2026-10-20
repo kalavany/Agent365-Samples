@@ -32,6 +32,7 @@ public class MyAgent : AgentApplication
     private readonly ILogger<MyAgent> _logger;
     private readonly IMcpToolRegistrationService _toolService;
     private readonly ComputerUseOrchestrator _orchestrator;
+    private readonly IConfiguration _configuration;
     private readonly string[] _mcpServerUrls;
     private readonly ScreenShareOptions _screenShareOptions;
     private readonly HandoffStore _handoffStore;
@@ -120,6 +121,7 @@ public class MyAgent : AgentApplication
         _logger = logger;
         _toolService = toolService;
         _orchestrator = orchestrator;
+        _configuration = configuration;
         _screenShareOptions = screenShareOptions.Value;
         _telemetryOptions = telemetryOptions.Value;
         _handoffStore = handoffStore;
@@ -311,7 +313,7 @@ public class MyAgent : AgentApplication
                     {
                         // Non-CUA fast path: with the current CUA-only ToolingManifest, skip MCP
                         // discovery entirely so chit-chat never touches W365.
-                        var (_, nonCuaAdditionalTools, _, _, _) = await GetToolsAsync(turnContext, ToolAuthHandlerName, includeW365: false, localSessionKey, cancellationToken);
+                        var (_, nonCuaAdditionalTools, _, _, _, _) = await GetToolsAsync(turnContext, ToolAuthHandlerName, includeW365: false, localSessionKey, cancellationToken);
                         var directResponse = await _orchestrator.RunAsync(
                             localSessionKey,
                             userText,
@@ -347,7 +349,7 @@ public class MyAgent : AgentApplication
                     }
 
                     // Get MCP tools — direct connection in Dev, SDK in Production
-                    var (w365Tools, additionalTools, mcpClient, prestartedW365SessionId, prestartedScreenShareUrl) = await GetToolsAsync(turnContext, ToolAuthHandlerName, includeW365: true, localSessionKey, cancellationToken);
+                    var (w365Tools, additionalTools, mcpClient, prestartedW365SessionId, prestartedScreenShareUrl, startSessionRequest) = await GetToolsAsync(turnContext, ToolAuthHandlerName, includeW365: true, localSessionKey, cancellationToken);
 
                     try
                     {
@@ -411,6 +413,7 @@ public class MyAgent : AgentApplication
                             prestartedScreenShareUrl: prestartedScreenShareUrl,
                             telemetryConversationId: conversationId,
                             telemetryChannelId: turnContext.Activity.ChannelId,
+                            startSessionRequest: startSessionRequest,
                             cancellationToken: cancellationToken);
 
                         // Send the response
@@ -438,7 +441,7 @@ public class MyAgent : AgentApplication
     /// When <paramref name="includeW365"/> is <c>false</c>, the W365 server(s) are skipped —
     /// used on the non-CUA fast path so chit-chat never starts a Cloud PC session.
     /// </summary>
-    private async Task<(IList<AITool>? W365Tools, IList<AITool>? AdditionalTools, IMcpClient? Client, string? PrestartedW365SessionId, string? PrestartedScreenShareUrl)> GetToolsAsync(
+    private async Task<(IList<AITool>? W365Tools, IList<AITool>? AdditionalTools, IMcpClient? Client, string? PrestartedW365SessionId, string? PrestartedScreenShareUrl, W365StartSessionRequest? StartSessionRequest)> GetToolsAsync(
         ITurnContext context,
         string? authHandlerName,
         bool includeW365,
@@ -474,11 +477,14 @@ public class MyAgent : AgentApplication
         if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(agentId))
         {
             _logger.LogWarning("No auth token or agent identity available. Cannot connect to MCP.");
-            return (null, null, null, null, null);
+            return (null, null, null, null, null, null);
         }
 
         try
         {
+            var startSessionRequest = includeW365
+                ? W365StartSessionRequest.FromActivityValue(context.Activity.Value, _configuration, accessToken)
+                : null;
             IList<AITool>? allTools;
             IMcpClient? mcpClient = null;
 
@@ -511,25 +517,26 @@ public class MyAgent : AgentApplication
                         agentId,
                         context,
                         existingSessionId,
+                        startSessionRequest!,
                         cancellationToken);
                     var additionalToolsForCua = Array.Empty<AITool>();
-                    return (w365Result.Tools, additionalToolsForCua, w365Result.Client, w365Result.SessionId, w365Result.ScreenShareUrl);
+                    return (w365Result.Tools, additionalToolsForCua, w365Result.Client, w365Result.SessionId, w365Result.ScreenShareUrl, startSessionRequest);
                 }
 
                 _logger.LogInformation("Skipping production MCP tool discovery for non-CUA turn while ToolingManifest is restricted to W365 CUA.");
-                return (null, Array.Empty<AITool>(), null, null, null);
+                return (null, Array.Empty<AITool>(), null, null, null, null);
             }
 
             var w365Tools = includeW365 ? FilterW365Tools(allTools) : null;
             var additionalTools = FilterAdditionalTools(allTools);
-            return (w365Tools, additionalTools, mcpClient, null, null);
+            return (w365Tools, additionalTools, mcpClient, null, null, startSessionRequest);
         }
         catch (Exception ex)
         {
             if (ShouldSkipToolingOnErrors())
             {
                 _logger.LogWarning(ex, "Failed to connect to MCP servers. Continuing without tools (SKIP_TOOLING_ON_ERRORS=true).");
-                return (null, null, null, null, null);
+                return (null, null, null, null, null, null);
             }
 
             _logger.LogError(ex, "Failed to connect to MCP servers.");
