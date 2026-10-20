@@ -7,84 +7,104 @@ using System.Text.Json;
 namespace W365ComputerUseSample.ComputerUse;
 
 /// <summary>
-/// Resolved options for one turn's W365 session starts. The caller identity comes only
-/// from the access token sent to MCP, never from activity or model arguments.
+/// StartSession arguments for one turn. <c>sessionKind</c> and <c>sessionProperties</c> come only
+/// from the user's Activity.Value; <c>userObjectId</c> comes only from the MCP access token.
+/// No value is filled in from configuration.
 /// </summary>
 public sealed class W365StartSessionRequest
 {
-    private W365StartSessionRequest(string sessionKind, string userObjectId, int displayWidth, int displayHeight, string browserMode)
+    private static readonly string[] IntegerProperties = ["displayWidth", "displayHeight"];
+    private static readonly string[] StringProperties = ["browserMode"];
+
+    private readonly string? sessionPropertiesJson;
+
+    private W365StartSessionRequest(string sessionKind, string userObjectId, JsonElement? sessionProperties)
     {
         SessionKind = sessionKind;
         UserObjectId = userObjectId;
-        DisplayWidth = displayWidth;
-        DisplayHeight = displayHeight;
-        BrowserMode = browserMode;
+        sessionPropertiesJson = sessionProperties?.GetRawText();
+        if (sessionProperties is { } properties)
+        {
+            DisplayWidth = properties.TryGetProperty("displayWidth", out var width) ? width.GetInt32() : null;
+            DisplayHeight = properties.TryGetProperty("displayHeight", out var height) ? height.GetInt32() : null;
+        }
     }
 
     public string SessionKind { get; }
     public string UserObjectId { get; }
-    public int DisplayWidth { get; }
-    public int DisplayHeight { get; }
-    public string BrowserMode { get; }
+
+    /// <summary>User-supplied display width, or null when not supplied.</summary>
+    public int? DisplayWidth { get; }
+
+    /// <summary>User-supplied display height, or null when not supplied.</summary>
+    public int? DisplayHeight { get; }
 
     /// <summary>
-    /// Resolves Activity.Value overrides and configuration defaults using the outbound
-    /// MCP token's oid. Reading this claim does not validate the token; MCP authenticates it.
+    /// Reads the required <c>sessionKind</c> and optional <c>sessionProperties</c> from Activity.Value,
+    /// and the required caller <c>oid</c> from the outbound MCP token. Reading the claim does not
+    /// validate the token; the MCP server authenticates it.
     /// </summary>
-    public static W365StartSessionRequest FromActivityValue(object? value, IConfiguration configuration, string accessToken)
+    public static W365StartSessionRequest FromActivityValue(object? value, string accessToken)
     {
-        ArgumentNullException.ThrowIfNull(configuration);
         var userObjectId = GetCallerObjectId(accessToken);
-        JsonElement? options = null;
-        if (value != null)
+        if (value == null)
         {
-            try
-            {
-                options = value is string json
-                    ? JsonSerializer.Deserialize<JsonElement>(json)
-                    : JsonSerializer.SerializeToElement(value);
-            }
-            catch (JsonException ex)
-            {
-                throw new ArgumentException("Activity.Value must be a JSON object containing session options.", nameof(value), ex);
-            }
-
-            if (options.Value.ValueKind != JsonValueKind.Object)
-            {
-                throw new ArgumentException("Activity.Value must be a JSON object containing session options.", nameof(value));
-            }
+            throw new ArgumentException("Activity.Value must be a JSON object containing sessionKind.", nameof(value));
         }
 
-        JsonElement? properties = null;
-        if (options is { } root && root.TryGetProperty("sessionProperties", out var suppliedProperties))
+        JsonElement options;
+        try
         {
-            if (suppliedProperties.ValueKind != JsonValueKind.Object)
-            {
-                throw new ArgumentException("sessionProperties must be a JSON object.", nameof(value));
-            }
-            properties = suppliedProperties;
+            options = value is string json
+                ? JsonSerializer.Deserialize<JsonElement>(json)
+                : JsonSerializer.SerializeToElement(value);
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException("Activity.Value must be a JSON object containing sessionKind.", nameof(value), ex);
         }
 
-        return new W365StartSessionRequest(
-            ReadString(options, "sessionKind", configuration["ComputerUse:SessionKind"] ?? "local"),
-            userObjectId,
-            ReadDimension(properties, "displayWidth", configuration.GetValue("ComputerUse:DisplayWidth", 1024)),
-            ReadDimension(properties, "displayHeight", configuration.GetValue("ComputerUse:DisplayHeight", 768)),
-            ReadString(properties, "browserMode", configuration["ComputerUse:BrowserMode"] ?? "chromium"));
+        if (options.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("Activity.Value must be a JSON object containing sessionKind.", nameof(value));
+        }
+
+        if (!options.TryGetProperty("sessionKind", out var sessionKind)
+            || sessionKind.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(sessionKind.GetString()))
+        {
+            throw new ArgumentException("sessionKind is required and must be a nonempty string.", nameof(value));
+        }
+
+        JsonElement? sessionProperties = null;
+        if (options.TryGetProperty("sessionProperties", out var suppliedProperties))
+        {
+            ValidateSessionProperties(suppliedProperties);
+            sessionProperties = suppliedProperties.Clone();
+        }
+
+        return new W365StartSessionRequest(sessionKind.GetString()!.Trim(), userObjectId, sessionProperties);
     }
 
-    /// <summary>Builds fresh MCP arguments so tool invocation cannot mutate this request.</summary>
-    public Dictionary<string, object?> ToArguments() => new()
+    /// <summary>
+    /// Builds fresh MCP arguments so tool invocation cannot mutate this request. <c>sessionProperties</c>
+    /// is sent exactly as supplied and omitted when the user did not supply it.
+    /// </summary>
+    public Dictionary<string, object?> ToArguments()
     {
-        ["sessionKind"] = SessionKind,
-        ["userObjectId"] = UserObjectId,
-        ["sessionProperties"] = new Dictionary<string, object?>
+        var arguments = new Dictionary<string, object?>
         {
-            ["displayWidth"] = DisplayWidth,
-            ["displayHeight"] = DisplayHeight,
-            ["browserMode"] = BrowserMode
+            ["sessionKind"] = SessionKind,
+            ["userObjectId"] = UserObjectId,
+        };
+        if (sessionPropertiesJson != null)
+        {
+            arguments["sessionProperties"] = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(sessionPropertiesJson)!
+                .ToDictionary(property => property.Key, property => (object?)property.Value);
         }
-    };
+
+        return arguments;
+    }
 
     internal static string GetCallerObjectId(string accessToken)
     {
@@ -102,36 +122,29 @@ public sealed class W365StartSessionRequest
         return oid.ToString();
     }
 
-    private static string ReadString(JsonElement? source, string name, string fallback)
+    private static void ValidateSessionProperties(JsonElement properties)
     {
-        var value = fallback;
-        if (source is { } element && element.TryGetProperty(name, out var supplied))
+        if (properties.ValueKind != JsonValueKind.Object)
         {
-            if (supplied.ValueKind != JsonValueKind.String)
-            {
-                throw new ArgumentException($"{name} must be a nonempty string.");
-            }
-            value = supplied.GetString()!;
+            throw new ArgumentException("sessionProperties must be a JSON object.");
         }
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new ArgumentException($"{name} must be a nonempty string.");
-        }
-        return value.Trim();
-    }
 
-    private static int ReadDimension(JsonElement? source, string name, int fallback)
-    {
-        var value = fallback;
-        if (source is { } element && element.TryGetProperty(name, out var supplied)
-            && (supplied.ValueKind != JsonValueKind.Number || !supplied.TryGetInt32(out value)))
+        foreach (var name in IntegerProperties)
         {
-            throw new ArgumentException($"{name} must be a positive integer.");
+            if (properties.TryGetProperty(name, out var supplied)
+                && (supplied.ValueKind != JsonValueKind.Number || !supplied.TryGetInt32(out var number) || number <= 0))
+            {
+                throw new ArgumentException($"sessionProperties.{name} must be a positive integer.");
+            }
         }
-        if (value <= 0)
+
+        foreach (var name in StringProperties)
         {
-            throw new ArgumentException($"{name} must be a positive integer.");
+            if (properties.TryGetProperty(name, out var supplied)
+                && (supplied.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(supplied.GetString())))
+            {
+                throw new ArgumentException($"sessionProperties.{name} must be a nonempty string.");
+            }
         }
-        return value;
     }
 }

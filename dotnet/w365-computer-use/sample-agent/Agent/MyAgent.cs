@@ -32,7 +32,6 @@ public class MyAgent : AgentApplication
     private readonly ILogger<MyAgent> _logger;
     private readonly IMcpToolRegistrationService _toolService;
     private readonly ComputerUseOrchestrator _orchestrator;
-    private readonly IConfiguration _configuration;
     private readonly string[] _mcpServerUrls;
     private readonly ScreenShareOptions _screenShareOptions;
     private readonly HandoffStore _handoffStore;
@@ -121,7 +120,6 @@ public class MyAgent : AgentApplication
         _logger = logger;
         _toolService = toolService;
         _orchestrator = orchestrator;
-        _configuration = configuration;
         _screenShareOptions = screenShareOptions.Value;
         _telemetryOptions = telemetryOptions.Value;
         _handoffStore = handoffStore;
@@ -483,7 +481,7 @@ public class MyAgent : AgentApplication
         try
         {
             var startSessionRequest = includeW365
-                ? W365StartSessionRequest.FromActivityValue(context.Activity.Value, _configuration, accessToken)
+                ? W365StartSessionRequest.FromActivityValue(context.Activity.Value, accessToken)
                 : null;
             IList<AITool>? allTools;
             IMcpClient? mcpClient = null;

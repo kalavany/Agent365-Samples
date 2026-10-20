@@ -626,7 +626,11 @@ public class ComputerUseOrchestrator
         for (var i = 0; i < _maxIterations; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (includeCuaTool && session.StartSessionRequest is { } request)
+            // Keep computer_use_preview coordinates aligned with any user-supplied session size.
+            // This only shapes the model tool; StartSession receives exactly what the user supplied.
+            if (includeCuaTool
+                && session.StartSessionRequest is { } request
+                && _tools.OfType<ComputerUseTool>().FirstOrDefault() is { } configuredTool)
             {
                 var dimensions = session.W365SessionId is { } activeSessionId
                     && session.DisplaySizesBySessionId.TryGetValue(activeSessionId, out var activeDimensions)
@@ -638,8 +642,8 @@ public class ComputerUseOrchestrator
                     {
                         modelTools[toolIndex] = new ComputerUseTool
                         {
-                            DisplayWidth = dimensions.Width,
-                            DisplayHeight = dimensions.Height
+                            DisplayWidth = dimensions.Width ?? configuredTool.DisplayWidth,
+                            DisplayHeight = dimensions.Height ?? configuredTool.DisplayHeight
                         };
                     }
                 }
@@ -2818,7 +2822,7 @@ public class ComputerUseOrchestrator
         public string? TelemetryConversationId { get; set; }
         public string? TelemetryChannelId { get; set; }
         public W365StartSessionRequest? StartSessionRequest { get; set; }
-        public Dictionary<string, (int Width, int Height)> DisplaySizesBySessionId { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, (int? Width, int? Height)> DisplaySizesBySessionId { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// screenShareUrl captured per W365 session id (from StartSession or a GetSessionDetails

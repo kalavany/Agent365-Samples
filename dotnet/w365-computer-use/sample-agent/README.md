@@ -368,14 +368,21 @@ The tool type is auto-derived from the model name (`gpt-*` -> `computer`, otherw
 
 ### StartSession request options
 
-Every `mcp_W365ComputerUse_StartSession` call includes `sessionKind`, `userObjectId`,
-and `sessionProperties` (`displayWidth`, `displayHeight`, `browserMode`). The
-`userObjectId` is the `oid` claim of the access token actually selected for W365
-MCP, not the Teams sender, Graph token, or an identity supplied in the message.
-The sample reads that outbound token; MCP remains responsible for validating
-the token and authorizing the caller.
+Every `mcp_W365ComputerUse_StartSession` call includes the required `sessionKind`
+and `userObjectId`, plus `sessionProperties` when the user supplies it. No value
+is filled in from configuration.
 
-Clients can supply per-message overrides in the activity's `value` object:
+- `sessionKind` (required) comes from the activity's `value` object.
+- `userObjectId` (required) is the `oid` claim of the access token selected for
+  W365 MCP, not the Teams sender, Graph token, or an identity supplied in the
+  message. The sample reads that outbound token; MCP remains responsible for
+  validating the token and authorizing the caller.
+- `sessionProperties` (optional) comes from the activity's `value` object and is
+  forwarded exactly as supplied. Its fields are optional; when present,
+  `displayWidth` and `displayHeight` must be positive integers and `browserMode`
+  must be a nonempty string. When omitted, `sessionProperties` is not sent.
+
+Example activity `value`:
 
 ```json
 {
@@ -388,14 +395,16 @@ Clients can supply per-message overrides in the activity's `value` object:
 }
 ```
 
-Omitted fields use `ComputerUse:SessionKind` (default `local`),
-`ComputerUse:BrowserMode` (default `chromium`), and the existing
-`ComputerUse:DisplayWidth` / `ComputerUse:DisplayHeight` settings (defaults
-1024 / 768). Supplied strings must be nonempty and dimensions must be positive
-integers. Invalid options or a missing/invalid token `oid` fail explicitly.
-Message-supplied `userObjectId` is ignored. These options apply to new sessions
+A missing or invalid `sessionKind`, malformed `sessionProperties`, or a
+missing/invalid token `oid` fails the computer-use turn explicitly. A
+message-supplied `userObjectId` is ignored. These options apply to new sessions
 and recovery starts during that turn; they do not resize an already active
-session. Non-computer-use messages do not require these options.
+session. Non-computer-use messages do not require them.
+
+`ComputerUse:DisplayWidth` / `ComputerUse:DisplayHeight` are not sent to
+StartSession. They only size the `computer_use_preview` model tool when the user
+does not supply a dimension.
+
 Cached W365 connections are checked against the current MCP caller `oid`; a
 caller change is rejected explicitly instead of sending another caller's
 `userObjectId` over the cached connection. Start a new conversation (production)

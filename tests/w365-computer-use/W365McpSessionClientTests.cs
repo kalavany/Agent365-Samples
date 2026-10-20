@@ -25,7 +25,6 @@ public sealed class W365McpSessionClientTests
             claims: [new Claim("oid", "11111111-1111-4111-8111-111111111111")]));
         var request = W365StartSessionRequest.FromActivityValue(
             new { sessionKind = "test-kind", sessionProperties = new { displayWidth = 1280, displayHeight = 720, browserMode = "test-browser" } },
-            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
             token);
 
         var result = await client.StartSessionAndListToolsAsync(request, CancellationToken.None);

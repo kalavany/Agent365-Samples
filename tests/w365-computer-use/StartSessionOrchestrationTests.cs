@@ -107,6 +107,40 @@ public sealed class StartSessionOrchestrationTests
     }
 
     [Fact]
+    public async Task StartupWithoutSessionPropertiesOmitsThemAndKeepsConfiguredModelToolSize()
+    {
+        var model = new ScriptedModel(
+            """{"output":[{"type":"function_call","call_id":"title-1","name":"browser_get_title","arguments":"{}"}]}""",
+            """{"output":[{"type":"message","content":[{"type":"output_text","text":"done"}]}]}""");
+        using var httpClient = new HttpClient();
+        var orchestrator = CreateOrchestrator(model, httpClient);
+        var starts = new List<JsonElement>();
+        IList<AITool> tools =
+        [
+            AIFunctionFactory.Create((AIFunctionArguments arguments) =>
+            {
+                starts.Add(JsonSerializer.SerializeToElement(arguments));
+                return """{"sessionId":"desktop-1"}""";
+            }, "mcp_W365ComputerUse_StartSession"),
+            AIFunctionFactory.Create(() => "Sample title", "browser_get_title")
+        ];
+        var token = new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(
+            claims: [new Claim("oid", "11111111-1111-4111-8111-111111111111")]));
+        var request = W365StartSessionRequest.FromActivityValue(new { sessionKind = "cloud" }, token);
+
+        var result = await orchestrator.RunAsync("conversation", "Read the browser title", tools, startSessionRequest: request);
+
+        Assert.Equal("done", result);
+        var start = Assert.Single(starts);
+        Assert.Equal(new[] { "sessionKind", "userObjectId" }, start.EnumerateObject().Select(property => property.Name).Order());
+        Assert.Equal("cloud", start.GetProperty("sessionKind").GetString());
+        Assert.Equal("11111111-1111-4111-8111-111111111111", start.GetProperty("userObjectId").GetString());
+        var computerTool = model.Requests[0].GetProperty("tools")[0];
+        Assert.Equal(1024, computerTool.GetProperty("display_width").GetInt32());
+        Assert.Equal(768, computerTool.GetProperty("display_height").GetInt32());
+    }
+
+    [Fact]
     public async Task NonComputerUseTurnDoesNotRequireSessionContext()
     {
         var model = new ScriptedModel("""{"output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}""");
@@ -140,8 +174,8 @@ public sealed class StartSessionOrchestrationTests
     {
         var token = new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(claims: [new Claim("oid", oid)]));
         return W365StartSessionRequest.FromActivityValue(
-            new { sessionProperties = new { displayWidth = width, displayHeight = height } },
-            new ConfigurationBuilder().Build(), token);
+            new { sessionKind = "local", sessionProperties = new { displayWidth = width, displayHeight = height, browserMode = "chromium" } },
+            token);
     }
 
     private static void AssertStartPayload(JsonElement arguments, string oid, int width, int height)
